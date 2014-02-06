@@ -2,6 +2,11 @@
 
 libvlc is the library behind vlc, handles the decoding, streaming and threading.
 
+### Options
+
+Options are parsed to the library and playing in some fucked up syntax which no one wishes to document. The command line help may help...
+[https://wiki.videolan.org/VLC_command-line_help/](https://wiki.videolan.org/VLC_command-line_help/)
+
 ### Streaming
 
 Transcoding xx.mp3 to 320kbs mp3 and streaming 2 TCP hosts and one UDP multicast in RTP. This can be consumed from pretty much any device.
