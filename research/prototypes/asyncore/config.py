@@ -1,0 +1,8 @@
+import uuid
+
+HOST_ID = str(uuid.uuid4())
+
+
+MESSAGING_PORT = 7777
+RTP_PORT = 7776
+BROADCAST_PORT = 7775

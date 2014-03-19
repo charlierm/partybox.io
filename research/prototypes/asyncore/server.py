@@ -82,7 +82,7 @@ class Host(asyncore.dispatcher):
         self.create_socket(socket.AF_INET, socket.SOCK_STREAM)
         self.set_reuse_addr()
         self.bind(('0.0.0.0', config.MESSAGING_PORT,))
-        self.listen(5)
+        self.listen(1)
         self.clients = []
 
     def handle_accepted(self, sock, addr):
