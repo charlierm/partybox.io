@@ -21,7 +21,6 @@ class UDPAnnounce(object):
     whilst the Announcer is running.
 
     """
-
     def __init__(self, address, port, interval=1):
         """
 
@@ -164,6 +163,19 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.log.warning('Lost connection to client {0}:{1}'.format(client_address[0], client_address[1]))
         self.remove_client(client_address)
 
+class PartyBoxHost(object):
+
+    def __init__(self, address, port, id):
+        self.address = address
+        self.port = port
+        self.id = id
+
+    def __eq__(self, other):
+        if self.id == other.id:
+            return True
+        else:
+            return False
+
 
 class PartyBoxListener(object):
 
@@ -177,23 +189,29 @@ class PartyBoxListener(object):
         self.log = logging.getLogger('PartyBox')
         self.callback = callback
 
+
+
     def listen(self, timeout=10):
         """
         Starts listening for partybox hosts
         """
-        self.log.info('Starting listening for party hosts')
-        ready = select.select([self.socket], [], [], timeout)
+        self.log.info('Listening for party hosts for {} seconds'.format(timeout))
 
-        if ready[0]:
-            data, addr = self.socket.recvfrom(1024)
+        start = time.time()
+        #TODO: This is poorly implemented, might be better to constantly listen for any hosts.
+        while time.time() - start < timeout:
+            ready = select.select([self.socket], [], [], 1)
 
-            try:
-                data = json.loads(data)
-                return addr[0]
+            if ready[0]:
+                data, addr = self.socket.recvfrom(1024)
 
-            except ValueError as e:
-                self.log.debug('Could not decode broadcast data from {}'.format(addr))
-                return None
+                try:
+                    data = json.loads(data)
+                    return addr[0]
+
+                except ValueError as e:
+                    self.log.debug('Could not decode broadcast data from {}'.format(addr))
+                    return None
 
 
 class ServerBootstrap(object):
@@ -217,7 +235,7 @@ class ServerBootstrap(object):
 
 if __name__ == "__main__":
 
-    #logging.basicConfig(level=logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
     ## Port 0 means to select an arbitrary unused port
     #port = config.COMMUNICATION_PORT
     #
