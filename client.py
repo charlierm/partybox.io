@@ -190,7 +190,7 @@ class PartyBoxListener(object):
 
 
 
-    def _listen(self, timeout=10):
+    def listen(self, timeout=10):
         """
         Starts listening for partybox hosts
         """
@@ -213,9 +213,6 @@ class PartyBoxListener(object):
                     return None
 
 
-    def listen(self, ):
-
-
 class ServerBootstrap(object):
 
     def __init__(self, port):
@@ -236,4 +233,27 @@ class ServerBootstrap(object):
 
 
 if __name__ == "__main__":
-    #Server is started so begin listening for any party box clients, 30 seconds should do it.
+
+    logging.basicConfig(level=logging.DEBUG)
+    ## Port 0 means to select an arbitrary unused port
+    #port = config.COMMUNICATION_PORT
+    #
+    #
+    #
+    #server = TCPServer(("0.0.0.0", port), ThreadedTCPRequestHandler)
+    #ip, port = server.server_address
+    #server_thread = threading.Thread(target=server.serve_forever)
+    #server_thread.daemon = True
+    #server_thread.start()
+    #
+    #logging.debug('Server started {0}:{1}'.format(ip, port))
+    #
+    #announcer = UDPAnnounce('224.0.0.1', config.COMMUNICATION_PORT)
+    #announcer.start()
+    #
+    #while True:
+    #    server.send("This is a test {}\n".format(time.time()))
+    #    time.sleep(5)
+
+    listener = PartyBoxListener(7775)
+    print(listener.listen())
