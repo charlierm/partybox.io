@@ -20,7 +20,7 @@ class UDPAnnounce(object):
     whilst the Announcer is running.
 
     """
-    def __init__(self, address, port, interval=1):
+    def __init__(self, address, port, server, interval=1):
         """
 
         :param str address: The host or multicast address to send packets to.
@@ -35,6 +35,8 @@ class UDPAnnounce(object):
         self.address = address
         self.setup()
         self.log = logging.getLogger('Broadcaster')
+        self.start_time = None
+        self.partybox_server = server
 
     def setup(self):
         """
@@ -49,6 +51,15 @@ class UDPAnnounce(object):
         """
         payload = {'type': 'PartyBoxAnnounce',
                    'id': '12345'}
+
+        data = {
+            'PartyBox': {
+                'type': 'broadcast',
+                'time': time.time(),
+                'name': self.partybox_server.name,
+                'media_port': self.partybox_server.media_port,
+            }
+        }
         self.socket.sendto(json.dumps(payload).encode('UTF-8'), (self.address, self.port))
         self.log.debug('Broadcast packet sent on port {}'.format(self.port))
 
@@ -69,6 +80,7 @@ class UDPAnnounce(object):
             self._timer.daemon = True
             self._timer.start()
             self.is_running = True
+            self.start_time = time.time()
 
     def stop(self):
         """
@@ -76,6 +88,7 @@ class UDPAnnounce(object):
         """
         self._timer.cancel()
         self.is_running = False
+        self.start_time = None
 
 
 class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
@@ -114,6 +127,11 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
 
     allow_reuse_address = True
+
+    def serve_forever(self, poll_interval=0.5):
+        super(TCPServer, self).serve_forever(poll_interval)
+        #Start UDP Announcing
+
 
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
         """
@@ -190,7 +208,7 @@ class PartyBoxListener(object):
 
 
 
-    def listen(self, timeout=10):
+    def _listen(self, timeout=10):
         """
         Starts listening for partybox hosts
         """
@@ -213,47 +231,60 @@ class PartyBoxListener(object):
                     return None
 
 
-class ServerBootstrap(object):
+class PartyBoxServer():
 
-    def __init__(self, port):
-        self.server = TCPServer(("0.0.0.0", port), ThreadedTCPRequestHandler)
+    def __init__(self, control_port, media_port, name=None):
+        self.control_port = control_port
+        self.media_port = media_port
+        if name:
+            self.name = name
+        else:
+            self.name = "PartyBox"
+        self.server = None
+        self.server_thread = None
+        self.announcer = UDPAnnounce("224.0.0.1", control_port, self)
+
+
+
+    def start(self):
+        if not self.server:
+            self.server = TCPServer(("0.0.0.0", self.control_port), ThreadedTCPRequestHandler)
+            self.server_thread = threading.Thread(target=self.server.serve_forever)
+            self.server_thread.daemon = True
+            self.server_thread.start()
+            logging.info('Partybox server started.')
+            self.announcer.start()
+            logging.info('Announcing server started.')
+        else:
+            logging.warning('Server is already running')
+
+
+    def stop(self):
+        if not self.server:
+            raise Exception('Server is already stopped')
+        else:
+            self.server.shutdown()
+            self.server = None
+            logging.info('Server stopped')
+            self.announcer.stop()
+            logging.info('Announcing server stopped')
 
     @property
     def clients(self):
-        """
-        Clients connected to the server
-        """
         clients = []
         for client in self.server.clients:
             clients.append(client[0])
         return set(clients)
 
-    def listen(self):
-        pass
+
 
 
 if __name__ == "__main__":
-
+    #Server is started so begin listening for any party box clients, 30 seconds should do it.
     logging.basicConfig(level=logging.DEBUG)
-    ## Port 0 means to select an arbitrary unused port
-    #port = config.COMMUNICATION_PORT
-    #
-    #
-    #
-    #server = TCPServer(("0.0.0.0", port), ThreadedTCPRequestHandler)
-    #ip, port = server.server_address
-    #server_thread = threading.Thread(target=server.serve_forever)
-    #server_thread.daemon = True
-    #server_thread.start()
-    #
-    #logging.debug('Server started {0}:{1}'.format(ip, port))
-    #
-    #announcer = UDPAnnounce('224.0.0.1', config.COMMUNICATION_PORT)
-    #announcer.start()
-    #
-    #while True:
-    #    server.send("This is a test {}\n".format(time.time()))
-    #    time.sleep(5)
+    #Start the server
+    server = PartyBoxServer(7775, 7776)
+    server.start()
+    time.sleep(15)
+    server.stop()
 
-    listener = PartyBoxListener(7775)
-    print(listener.listen())

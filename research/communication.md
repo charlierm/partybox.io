@@ -39,4 +39,18 @@ An example packet will look like this:
 }
 ```
 
+### Media Broadcasting
+It is important clients are aware of what they're playing, this allows mobile devices acting as clients to visually display information. This will be broadcast over UDP on. The following information will be useful for clients:
+
+* Time - Timestamp of when the packet was sent 
+* Type - The type of message, in this case 'playing'
+* Backend - The name of the backend.
+* Title - Title of the track/stream.
+* Artist - Artist of track.
+* Album - Album name if relevant.
+* Album art - Image relating to the track.
+
+Somehow the album art needs to either be transmitted with the packet, alternatively images could be pulled from the internet, however this would require external network access.
+
+
 

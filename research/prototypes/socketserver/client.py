@@ -213,27 +213,52 @@ class PartyBoxListener(object):
                     return None
 
 
-    def listen(self, ):
+class PartyBoxServer():
+
+    def __init__(self, control_port, media_port, name=None):
+        self.control_port = control_port
+        self.media_port = media_port
+        if name:
+            self.name = name
+        else:
+            self.name = "PartyBox"
+        self.server = None
+        self.server_thread = None
 
 
-class ServerBootstrap(object):
 
-    def __init__(self, port):
-        self.server = TCPServer(("0.0.0.0", port), ThreadedTCPRequestHandler)
+    def start(self):
+        if not self.server:
+            self.server = TCPServer(("0.0.0.0", self.control_port), ThreadedTCPRequestHandler)
+            self.server_thread = threading.Thread(target=self.server.serve_forever)
+            self.server_thread.daemon = True
+            self.server_thread.start()
+            logging.info('Partybox server started.')
+        else:
+            logging.warning('Server is already running')
+
+
+    def stop(self):
+        if not self.server:
+            raise Exception('Server is already stopped')
+        else:
+            self.server.shutdown()
+            self.server = None
 
     @property
     def clients(self):
-        """
-        Clients connected to the server
-        """
         clients = []
         for client in self.server.clients:
             clients.append(client[0])
         return set(clients)
 
-    def listen(self):
-        pass
+
 
 
 if __name__ == "__main__":
     #Server is started so begin listening for any party box clients, 30 seconds should do it.
+
+    #Start the server
+    server = PartyBoxServer()
+    server.start()
+    serv
