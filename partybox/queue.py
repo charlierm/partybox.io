@@ -1,3 +1,5 @@
+import random
+
 class BaseQueue(object):
 
     def __init__(self):
@@ -81,6 +83,13 @@ class StandardQueue(BaseQueue):
 
     def add_next(self, media):
         self._queue.insert(1, media)
+
+
+    def toggle_shuffle(self):
+        random.shuffle(self._queue)
+
+    def __len__(self):
+        return len(self._queue)
 
 
 
