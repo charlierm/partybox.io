@@ -36,7 +36,7 @@ class NetworkUtils():
         return mac
 
     @classmethod
-    def get_mac_address(cls, host):
+    def get_mac_addr(cls, host):
         """
         Returns the mac address for a host on the same subnet.
         :param str host: Host to retrieve mac address.
@@ -76,7 +76,3 @@ class NetworkUtils():
         result = p.communicate()
         if result[1]:
             raise HostResolutionException(result[1])
-
-
-
-print NetworkUtils.active_device()

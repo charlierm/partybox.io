@@ -4,6 +4,7 @@ import logging
 import time
 import json
 import select
+import vlc
 
 try:
     import SocketServer as socketserver
@@ -20,48 +21,28 @@ class UDPAnnounce(object):
     whilst the Announcer is running.
 
     """
-    def __init__(self, address, port, server, interval=1):
+    def __init__(self, address, message, interval=1):
         """
 
-        :param str address: The host or multicast address to send packets to.
-        :param int port: The port to use.
+        :param tuple address: The host or multicast address to send packets to.
+        :param dict msg: Message to broadcast.
         :param int interval: The time interval in seconds between each packet.
         """
         self._timer = None
-        self.interval = interval
         self.is_running = False
-        self.socket = None
-        self.port = port
-        self.address = address
-        self.setup()
-        self.log = logging.getLogger('Broadcaster')
+        self.log = logging.getLogger('UDPAnnounce')
         self.start_time = None
-        self.partybox_server = server
-
-    def setup(self):
-        """
-        Sets up the UDP socket, this can be overridden.
-        """
+        self._message = message
+        self._address = address
+        self._interval = interval
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
 
     def _broadcast(self):
         """
         Sends the UDP packet to the specified port.
         """
-        payload = {'type': 'PartyBoxAnnounce',
-                   'id': '12345'}
-
-        data = {
-            'PartyBox': {
-                'type': 'broadcast',
-                'time': time.time(),
-                'name': self.partybox_server.name,
-                'media_port': self.partybox_server.media_port,
-            }
-        }
-        self.socket.sendto(json.dumps(payload).encode('UTF-8'), (self.address, self.port))
-        self.log.debug('Broadcast packet sent on port {}'.format(self.port))
+        self.socket.sendto(json.dumps(self._message).encode('UTF-8'), self._address)
+        self.log.debug('Broadcast packet sent {}'.format(self._address))
 
     def _run(self):
         """
@@ -74,9 +55,10 @@ class UDPAnnounce(object):
     def start(self):
         """
         Starts broadcasting on UDP.
+        :param dict message: Message to broadcast.
         """
         if not self.is_running:
-            self._timer = threading.Timer(self.interval, self._run)
+            self._timer = threading.Timer(self._interval, self._run)
             self._timer.daemon = True
             self._timer.start()
             self.is_running = True
@@ -84,7 +66,7 @@ class UDPAnnounce(object):
 
     def stop(self):
         """
-        Stops the server broadcasting.
+        Stops the server broadcasting.1
         """
         self._timer.cancel()
         self.is_running = False
@@ -129,8 +111,11 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     allow_reuse_address = True
 
     def serve_forever(self, poll_interval=0.5):
-        super(TCPServer, self).serve_forever(poll_interval)
-        #Start UDP Announcing
+        """
+        Starts announcing over UDP when the TCPServer is running.
+        """
+        self.announcer.start()
+        socketserver.TCPServer.serve_forever(self, poll_interval)
 
 
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
@@ -142,6 +127,15 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         socketserver.TCPServer.__init__(self, server_address, RequestHandlerClass, bind_and_activate)
         self.log = logging.getLogger('server')
         self.clients = {}
+
+        msg = {
+            'PARTYBOX': {
+                'TYPE': 'BROADCAST',
+                'ALIVE_SINCE': time.time(),
+            }
+        }
+        #Setup Announcer
+        self.announcer = UDPAnnounce(("224.0.0.1", self.server_address[1]), msg)
 
     def finish_request(self, request, client_address):
         """
@@ -180,60 +174,25 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.log.warning('Lost connection to client {0}:{1}'.format(client_address[0], client_address[1]))
         self.remove_client(client_address)
 
-class PartyBoxHost(object):
 
-    def __init__(self, address, port, id):
-        self.address = address
-        self.port = port
-        self.id = id
-
-    def __eq__(self, other):
-        if self.id == other.id:
-            return True
-        else:
-            return False
-
-
-class PartyBoxListener(object):
-
-    def __init__(self, port, callback=None):
-        """
-        Sets up the socket for listening
-        """
-        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.socket.bind(('0.0.0.0', port))
-        self.socket.setblocking(0)
-        self.log = logging.getLogger('PartyBox')
-        self.callback = callback
+    def shutdown(self):
+        self.announcer.stop()
+        socketserver.TCPServer.shutdown()
 
 
 
-    def _listen(self, timeout=10):
-        """
-        Starts listening for partybox hosts
-        """
-        self.log.info('Listening for party hosts for {} seconds'.format(timeout))
-
-        start = time.time()
-        #TODO: This is poorly implemented, might be better to constantly listen for any hosts.
-        while time.time() - start < timeout:
-            ready = select.select([self.socket], [], [], 1)
-
-            if ready[0]:
-                data, addr = self.socket.recvfrom(1024)
-
-                try:
-                    data = json.loads(data)
-                    return addr[0]
-
-                except ValueError as e:
-                    self.log.debug('Could not decode broadcast data from {}'.format(addr))
-                    return None
-
-
-class PartyBoxServer():
+class StreamingServer(object):
+    """
+    Controls starting and stopping both the TCP server and UDP broadcasting
+    """
 
     def __init__(self, control_port, media_port, name=None):
+        """
+
+        :param control_port: The port to control clients over
+        :param media_port: Port to stream on.
+        :param name: The name of the server.
+        """
         self.control_port = control_port
         self.media_port = media_port
         if name:
@@ -245,8 +204,10 @@ class PartyBoxServer():
         self.announcer = UDPAnnounce("224.0.0.1", control_port, self)
 
 
-
     def start(self):
+        """
+        Start the TCP server and UDP broadcasting
+        """
         if not self.server:
             self.server = TCPServer(("0.0.0.0", self.control_port), ThreadedTCPRequestHandler)
             self.server_thread = threading.Thread(target=self.server.serve_forever)
@@ -260,6 +221,9 @@ class PartyBoxServer():
 
 
     def stop(self):
+        """
+        Stop the TCP server and UDP broadcasting
+        """
         if not self.server:
             raise Exception('Server is already stopped')
         else:
@@ -269,22 +233,21 @@ class PartyBoxServer():
             self.announcer.stop()
             logging.info('Announcing server stopped')
 
-    @property
-    def clients(self):
-        clients = []
-        for client in self.server.clients:
-            clients.append(client[0])
-        return set(clients)
-
 
 
 
 if __name__ == "__main__":
-    #Server is started so begin listening for any party box clients, 30 seconds should do it.
     logging.basicConfig(level=logging.DEBUG)
-    #Start the server
-    server = PartyBoxServer(7775, 7776)
-    server.start()
-    time.sleep(15)
-    server.stop()
+    server = TCPServer(("0.0.0.0", 7773), ThreadedTCPRequestHandler)
+    server.serve_forever()
 
+
+#
+# data = {
+#             'PartyBox': {
+#                 'type': 'broadcast',
+#                 'time': time.time(),
+#                 'name': self.partybox_server.name,
+#                 'media_port': self.partybox_server.media_port,
+#             }
+#         }
