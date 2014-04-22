@@ -95,10 +95,6 @@ PORT = 8234
 instance = vlc.Instance()
 player = vlc.MediaPlayer(instance)
 
-#Set the media for vlc
-media = vlc.Media("rtp://@:{}".format(PORT))
-player.set_media(media)
-
 #UDP listen
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(('224.0.0.1', PORT))
@@ -122,6 +118,10 @@ while True:
 #Now try and connect to the server
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect((server_ip, PORT))
+
+#Set the media for vlc
+media = vlc.Media("rtp://{0}:{1}".format(server_ip, PORT))
+player.set_media(media)
 
 while True:
     data = s.recv(1024)
