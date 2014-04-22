@@ -4,7 +4,10 @@ import logging
 import time
 import json
 import select
+
 import vlc
+import media
+import decorators
 
 try:
     import SocketServer as socketserver
@@ -81,7 +84,7 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         to add the handler to the clients list in this method. Its a bit backwards but it works!
         """
         self.server.clients[self.client_address] = self
-        self.outbox = queue.Queue()
+        self.queue = queue.Queue()
         self.log = logging.getLogger('Request')
 
     def handle(self):
@@ -90,7 +93,7 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         the connection is explicitly closed or an exception is raised.
         """
         while True:
-            msg = self.outbox.get(block=True)
+            msg = self.queue.get(block=True)
             self.request.sendall(msg)
 
     def finish(self):
@@ -101,12 +104,21 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         self.server.remove_client()
 
 
+    def message(self, msg):
+        """
+        Sends a message to the client
+        """
+        self.queue.put(msg)
+
+
 class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     """
     A publish/subscribe server using SocketServer. Allows the server to push messages out to clients.
     Clients are pinged every second to ensure they're still connected. Each connection is handled in a seperate
     thread. Messages are pushed onto a queue.
     """
+
+    #TODO: Should periodically ping to ensure all clients are alive.
 
     allow_reuse_address = True
 
@@ -126,7 +138,7 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """
         socketserver.TCPServer.__init__(self, server_address, RequestHandlerClass, bind_and_activate)
         self.log = logging.getLogger('server')
-        self.clients = {}
+        self._clients = {}
 
         msg = {
             'PARTYBOX': {
@@ -142,16 +154,16 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         Called to initialise the handler for a request.
         """
         self.log.info('Connection from {0}:{1}'.format(client_address[0], client_address[1]))
-        self.RequestHandlerClass(request, client_address, self)
+        socketserver.TCPServer.finish_request(self, request, client_address)
 
-    def send(self, message):
+    def message_all(self, message):
         """
         Sends a message to all connected clients.
         :param str message: The message to send.
         """
-        self.log.debug('Sending message to {} clients'.format(len(self.clients)))
-        for address, handler in self.clients.items():
-            handler.outbox.put(message)
+        self.log.debug('Sending message to {} clients'.format(len(self._clients)))
+        for address, handler in self._clients.items():
+            handler.message(message)
 
     def remove_client(self, client_address):
         """
@@ -160,8 +172,8 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         :param tuple client_address: The host,port tuple
         """
         try:
-            self.clients[client_address].request.close()
-            del self.clients[client_address]
+            self._clients[client_address].request.close()
+            del self._clients[client_address]
             self.log.info('Client removed {}'.format(client_address))
         except KeyError as e:
             self.log.info('Could not remove client from list')
@@ -175,9 +187,196 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.remove_client(client_address)
 
 
+    @property
+    def clients(self):
+        """
+        List of connected clients
+        """
+        return self._clients
+
+
     def shutdown(self):
         self.announcer.stop()
         socketserver.TCPServer.shutdown()
+
+
+
+class RDPConsumer(object):
+    """
+    A simple RDP player.
+    """
+    pass
+
+
+class MediaServer(object):
+    """
+    Plays music and streams it to clients.
+    """
+
+    def __init__(self, media_port=7775, comm_port=7776):
+        #Start the TCP server
+        self.server = TCPServer(("0.0.0.0", comm_port), ThreadedTCPRequestHandler)
+        t = threading.Thread(target=self.server.serve_forever)
+        t.daemon = True
+        t.start()
+        #Setup vlc
+        self.instance = vlc.Instance()
+        self._player = vlc.MediaPlayer(self.instance)
+        self._port = media_port
+        self._queue = media.Queue()
+        self._log = logging.getLogger('MediaServer')
+        self._setup_events()
+        self._now_playing = None
+        self.history = []
+
+
+    @property
+    def now_playing(self):
+        """
+        The media item currently playing
+        """
+        return self._now_playing
+
+    @property
+    def queue(self):
+        """
+        :rtype : media.Queue
+        """
+        return self._queue
+
+    @decorators.synchronized
+    def previous(self):
+        """
+        Plays the most recent track in history
+        """
+        #Get last track and move now playing back into queue
+        try:
+            media = self.history.pop()
+            if self.now_playing:
+                self.queue.insert(0, self.now_playing)
+        except IndexError:
+            self._log.warning("No tracks in history to load")
+            return
+
+        #Load the media
+        m = vlc.Media(media.get_uri())
+        self._player.set_media(m)
+        self._now_playing = media
+
+    @decorators.synchronized
+    def next(self):
+        """
+        Skips to the next track in the Queue
+        """
+        #Move now playing to history
+        if self.now_playing:
+            self.history.append(self.now_playing)
+
+        try:
+            media = self._queue.pop(0)
+        except IndexError:
+            #No tracks left in the queue so stop
+            self.stop()
+            return
+
+        #Create new player and attach events
+        paused = self.paused
+        self._player = vlc.MediaPlayer(self.instance)
+        self._setup_events()
+
+        #Load media
+        m = vlc.Media(media.get_uri())
+        self._player.set_media(m)
+        self._now_playing = media
+        if not paused:
+            self.play()
+
+    def _encountered_error(self, event):
+        """
+        Called when the player encounters an error, used to recover from it.
+        """
+        self._log.error(vlc.libvlc_errmsg())
+        self.next()
+
+    def _stopped(self, event):
+        """
+        Libvlc event, called when stopped. Empties queue and removes now playing.
+        """
+        self.queue.clear()
+        self._now_playing = None
+        self._player.set_media(None)
+
+    def _end_reached(self, event):
+        print("Track finished")
+        print(event)
+        self._log.info('Track ended')
+        self.next()
+
+    def _media_changed(self, event):
+        self._log.info("Track changed: {}".format(self._player.get_media().get_mrl()))
+
+    def _setup_events(self):
+        self.events = self._player.event_manager()
+        self.events.event_attach(vlc.EventType.MediaPlayerEndReached, self._end_reached)
+        self.events.event_attach(vlc.EventType.MediaPlayerStopped, self._stopped)
+        self.events.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._encountered_error)
+        self.events.event_attach(vlc.EventType.MediaPlayerMediaChanged, self._media_changed)
+
+
+    def stop(self):
+        if self._player.get_media():
+            self.stop()
+
+    def play(self):
+        """
+        Plays or resumes the current loaded media.
+        """
+        #Check for loaded media
+        if not self._player.get_media():
+            self.next()
+            return
+
+        state = self._player.get_state()
+        if state == vlc.State.Ended:
+            #Start next track
+            self.next()
+
+        elif state == vlc.State.Stopped:
+            #Repeat the current loaded track?
+            self._player.stop()
+            self._player.play()
+
+        elif state == vlc.State.Paused or state == vlc.State.NothingSpecial:
+            self._player.play()
+
+    @property
+    def position(self):
+        pos = self._player.get_position()
+        if pos < 0:
+            return None
+        else:
+            return pos*100
+
+    @position.setter
+    def position(self, value):
+        self._player.set_position(float(value)/100)
+
+
+    def pause(self):
+        self._player.set_pause(True)
+
+    @property
+    def paused(self):
+        if self._player.get_state() == vlc.State.Paused:
+            return True
+        else:
+            return False
+
+    @paused.setter
+    def paused(self, value):
+        self.pause()
+
+
 
 
 
@@ -237,9 +436,47 @@ class StreamingServer(object):
 
 
 if __name__ == "__main__":
-    logging.basicConfig(level=logging.DEBUG)
-    server = TCPServer(("0.0.0.0", 7773), ThreadedTCPRequestHandler)
-    server.serve_forever()
+    logging.basicConfig(level=logging.INFO)
+    server = MediaServer()
+    #Load some fucking tracks
+    playlist = (
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Arctic Monkeys/AM (Deluxe LP Edition)/11 Knee Socks.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Athlete/Vehicles & Animals/01 El Salvador.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Bon Iver/For Emma, Forever Ago/09 Re_ Stacks.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/The Killers/Sam's Town/03 When You Were Young.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Of Monsters and Men/My Head Is an Animal/13 Numb Bears.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Rhye/Woman/02 The Fall.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Tycho/Dive/01 A Walk.mp3",
+        "/Users/charlie/Music/iTunes/iTunes Media/Music/Snow Patrol/Fallen Empires/02 Called Out In The Dark.mp3"
+    )
+    for t in playlist:
+        server.queue.append(media.TestMedia(t))
+
+    server.queue.shuffle()
+    print("loaded {} tracks".format(len(server.queue)))
+
+    print("Play queue length: {}".format(len(server.queue)))
+    print("Player state: {}".format(server._player.get_state()))
+    print("Currently playing: {}".format(server.now_playing))
+
+
+    server.play()
+    server.position = 95
+    counter = 0
+    while True:
+        counter +=1
+        time.sleep(1)
+        print("Play queue length: {}".format(len(server.queue)))
+        print("History stack length: {}".format(len(server.history)))
+        print("Player state: {}".format(server._player.get_state()))
+        print("Currently playing: {}".format(server.now_playing))
+        if counter == 20:
+            server.previous()
+
+
+
+
+
 
 
 #
