@@ -75,6 +75,11 @@ class UDPAnnounce(object):
         self.start_time = None
 
 
+class TCPServerEvent(object):
+    ClientConnected = 1
+    ClientDisconnected = 2
+
+
 class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
 
     def setup(self):
@@ -83,6 +88,7 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         to add the handler to the clients list in this method. Its a bit backwards but it works!
         """
         self.server._clients[self.client_address] = self
+        self.server._callback(TCPServerEvent.ClientConnected, self)
         self.queue = queue.Queue()
         self.log = logging.getLogger('Request')
 
@@ -123,6 +129,7 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     #TODO: Should periodically ping to ensure all clients are alive.
 
     allow_reuse_address = True
+    callbacks = []
 
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
         """
@@ -142,6 +149,23 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         }
         #Setup Announcer
         self.announcer = UDPAnnounce(("224.0.0.1", self.server_address[1]), msg)
+
+
+    def register_callback(self, event_type, callable):
+        """
+        Registers an event callback.
+        """
+        self.callbacks.append((event_type, callable))
+
+    def _callback(self, event_type, obj):
+        """
+        Calls event callbacks
+        """
+        #Start a thread for each callback
+        for x in (y for y in self.callbacks if y[0] == event_type):
+            t = threading.Thread(target=x[1], args=(event_type, obj))
+            t.daemon = True
+            t.start()
 
 
     def serve_forever(self, poll_interval=0.5):
@@ -253,6 +277,12 @@ class MediaServer(object):
         self._setup_events()
         self._now_playing = None
         self.history = []
+
+        self._server.register_callback(TCPServerEvent.ClientConnected, self._client_connected)
+
+
+    def _client_connected(self, event, client):
+        self.update_stream_output()
 
 
     @property
