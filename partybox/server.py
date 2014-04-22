@@ -235,16 +235,16 @@ class MediaServer(object):
     Plays music and streams it to clients.
     """
 
-    def __init__(self, media_port=8234, comm_port=8235):
+    def __init__(self, port=8234):
         #Start the TCP server
-        self._server = TCPServer(("0.0.0.0", comm_port), ThreadedTCPRequestHandler)
+        self._server = TCPServer(("0.0.0.0", port), ThreadedTCPRequestHandler)
         t = threading.Thread(target=self._server.serve_forever)
         t.daemon = True
         t.start()
         #Setup vlc
         self.instance = vlc.Instance()
         self._player = vlc.MediaPlayer(self.instance)
-        self._port = media_port
+        self._port = port
         self._queue = media.Queue()
         self._log = logging.getLogger('MediaServer')
         self._setup_events()
@@ -458,6 +458,8 @@ class MediaServer(object):
 
     @volume.setter
     def volume(self, value):
+        self._server.message_all("VOLUME {}".format(value))
+        #TODO: Need to be able to control volume on each client
         self._player.audio_set_volume(value)
 
 
@@ -508,7 +510,7 @@ class MediaServer(object):
 
 
 
-    def resync_clients(self):
+    def restart_clients(self):
         """
         Causes all clients to restart, usually sorts any synchronisation issues.
         """

@@ -1,6 +1,7 @@
 import vlc
 import socket
 import time
+import json
 import logging
 import select
 
@@ -86,10 +87,57 @@ class NetworkListener(object):
                     return None
 
 
-if __name__ == '__main__':
-    client = PartyBoxClient('localhost', 7775)
-    client.play()
-    while True:
-        time.sleep(1)
+
+#Port to listen on
+PORT = 8234
+
+#Create VLC stuff
+instance = vlc.Instance()
+player = vlc.MediaPlayer(instance)
+
+#Set the media for vlc
+media = vlc.Media("rtp://@:{}".format(PORT))
+player.set_media(media)
+
+#UDP listen
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.bind(('224.0.0.1', PORT))
+
+server_ip = None
+
+while True:
+    data, addr = s.recvfrom(1024)
+
+    try:
+        data = json.loads(data)
+        if 'PARTYBOX' in data:
+            print("Found server - {}".format(addr[0]))
+            server_ip = addr[0]
+            s.close()
+            break
+
+    except ValueError:
+        continue
+
+#Now try and connect to the server
+s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+s.connect((server_ip, PORT))
+
+while True:
+    data = s.recv(1024)
+    print(data)
+    if 'SOUT UPDATED' in data:
+        print("Starting stream")
+        print player.play()
+    elif 'RESTART' in data:
+        print("Restarting stream")
+        player.stop()
+        player.play()
+    elif 'VOLUME' in data:
+        print("Setting volume")
+        volume = data.split(" ")[1]
+        player.audio_set_volume(int(volume))
+    # import pdb; pdb.set_trace()
+        print player.get_state()
 
 
