@@ -1,6 +1,9 @@
 import threading
 
 def synchronized(func):
+    """
+    Decorator to make a function thread safe
+    """
 
     func.__lock__ = threading.Lock()
 

@@ -3,8 +3,6 @@ import threading
 import logging
 import time
 import json
-import select
-import multiprocessing
 
 import vlc
 import media
@@ -133,11 +131,6 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.log = logging.getLogger('server')
         self._clients = {}
 
-        #Start pinging
-        t = threading.Thread(target=self.ping)
-        t.daemon = True
-        t.start()
-
         msg = {
             'PARTYBOX': {
                 'TYPE': 'BROADCAST',
@@ -147,10 +140,6 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         #Setup Announcer
         self.announcer = UDPAnnounce(("224.0.0.1", self.server_address[1]), msg)
 
-    def ping(self):
-        while True:
-            time.sleep(5)
-            self.message_all("PING\n")
 
     def serve_forever(self, poll_interval=0.5):
         """
@@ -158,14 +147,6 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         """
         self.announcer.start()
         socketserver.TCPServer.serve_forever(self, poll_interval)
-
-    def stop(self):
-        """
-        Stops the server broadcasting.1
-        """
-        self._timer.cancel()
-        self.ping_running = False
-
 
     def finish_request(self, request, client_address):
         """
@@ -233,6 +214,11 @@ class VLCTools(object):
 
     @staticmethod
     def generate_sout(clients, port):
+        """
+        Generates a VLC sout string for a Media object.
+        :param list clients: Addresses to push stream to.
+        :param int port: Port to stream on.
+        """
         sout = []
         for client in clients:
             protocol = 'udp'
@@ -249,7 +235,7 @@ class MediaServer(object):
     Plays music and streams it to clients.
     """
 
-    def __init__(self, media_port=7775, comm_port=7777):
+    def __init__(self, media_port=8234, comm_port=8235):
         #Start the TCP server
         self._server = TCPServer(("0.0.0.0", comm_port), ThreadedTCPRequestHandler)
         t = threading.Thread(target=self._server.serve_forever)
@@ -280,6 +266,7 @@ class MediaServer(object):
         """
         return self._queue
 
+    @decorators.synchronized
     def previous(self):
         """
         Plays the most recent track in history
@@ -303,6 +290,7 @@ class MediaServer(object):
         if playing:
             self.play()
 
+    @decorators.synchronized
     def next(self):
         """
         Skips to the next track in the Queue
@@ -344,17 +332,32 @@ class MediaServer(object):
         self.next()
 
     def _end_reached(self, event):
-        print("Track finished")
-        print(event)
+        """
+        VLC callback - Track finished playing
+        """
         self._log.info('Track ended')
         self.next()
         self._player.play()
 
     def _media_changed(self, event):
+        """
+        VLC callback - Media changed.
+        Called when self._player has a new media set, does not always mean self.now_playing has changed.
+        """
         self._log.info("Track changed: {}".format(self._player.get_media().get_mrl()))
-        self._server.message_all("Track changed!!!")
+        self._server.message_all(self._player.get_media().get_mrl() + "\n")
+        self._sout_updated()
+
+    def _sout_updated(self):
+        """
+        Callback - Called when the server SOUT is updated to connected clients.
+        """
+        self._server.message_all("SOUT UPDATED\n")
 
     def _setup_events(self):
+        """
+        Attaches events to the MediaPlayer object, called when self._player is replaced.
+        """
         self.events = self._player.event_manager()
         self.events.event_attach(vlc.EventType.MediaPlayerEndReached, self._end_reached)
         self.events.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._encountered_error)
@@ -362,14 +365,24 @@ class MediaServer(object):
 
 
     def _get_vlc_media(self, uri):
+        """
+        Creates a vlc_media object with the correct sout.
+
+        :param str uri: URI to create media object with.
+        :return: vlc.Media
+        """
         cmd = VLCTools.generate_sout(self._server.clients, self._port)
         print cmd
         return vlc.Media(uri, cmd)
 
 
     def stop(self):
+        """
+        Stops current playback.
+        """
         if 0 <= self._player.stop():
             self._now_playing = None
+            #TODO: Now playing will be out of sync here.
 
 
     def play(self):
@@ -397,6 +410,10 @@ class MediaServer(object):
 
     @property
     def position(self):
+        """
+        Current position of the player as a percentage.
+        None if not playing or idle.
+        """
         pos = self._player.get_position()
         if pos < 0:
             print(vlc.libvlc_errmsg())
@@ -409,10 +426,19 @@ class MediaServer(object):
         self._player.set_position(float(value)/100)
 
     def pause(self):
+        """
+        Toggle pause for the player. If media is stopped or not loaded then
+        it will have no effect.
+        """
         self._player.set_pause(True)
 
     @property
     def paused(self):
+        """
+        Whether or not playback is paused. If playback is stopped
+        or idle then this will not evaluate to True.
+        :rtype : bool
+        """
         if self._player.get_state() == vlc.State.Paused:
             return True
         else:
@@ -424,6 +450,10 @@ class MediaServer(object):
 
     @property
     def volume(self):
+        """
+        Volume of media player as percentage.
+        0 <> 100
+        """
         return self._player.audio_get_volume()
 
     @volume.setter
@@ -433,6 +463,9 @@ class MediaServer(object):
 
     @property
     def time(self):
+        """
+        Current positon of playback in seconds
+        """
         return self._player.get_time()/1000.0
 
     @time.setter
@@ -440,15 +473,24 @@ class MediaServer(object):
         self._player.set_time(value*1000)
 
     def fade_out(self):
-        v = self.volume
-        while self.volume > 0:
-            self.volume -= 1
-            time.sleep(0.05)
-        self.stop()
-        self.volume = v
+        """
+        Fades out volume and pauses media.
+        """
+        if self._player.get_state() == vlc.State.Playing:
+            v = self.volume
+            while self.volume > 0:
+                self.volume -= 1
+                time.sleep(0.05)
+            self.pause()
+            self.volume = v
 
 
-    def update_stream(self):
+    def update_stream_output(self):
+        """
+        Updates the list of clients the server is streaming to.
+        Media will pause briefly while the media with updated output
+        is loaded.
+        """
         if not self._player.get_media():
             return
         playing = self._player.get_state() == vlc.State.Playing
@@ -466,84 +508,15 @@ class MediaServer(object):
 
 
 
-
-
-
-class StreamingServer(object):
-    """
-    Controls starting and stopping both the TCP server and UDP broadcasting
-    """
-
-    def __init__(self, control_port, media_port, name=None):
+    def resync_clients(self):
         """
-
-        :param control_port: The port to control clients over
-        :param media_port: Port to stream on.
-        :param name: The name of the server.
+        Causes all clients to restart, usually sorts any synchronisation issues.
         """
-        self.control_port = control_port
-        self.media_port = media_port
-        if name:
-            self.name = name
-        else:
-            self.name = "PartyBox"
-        self.server = None
-        self.server_thread = None
-        self.announcer = UDPAnnounce("224.0.0.1", control_port, self)
-
-
-    def start(self):
-        """
-        Start the TCP server and UDP broadcasting
-        """
-        if not self.server:
-            self.server = TCPServer(("0.0.0.0", self.control_port), ThreadedTCPRequestHandler)
-            self.server_thread = threading.Thread(target=self.server.serve_forever)
-            self.server_thread.daemon = True
-            self.server_thread.start()
-            logging.info('Partybox server started.')
-            self.announcer.start()
-            logging.info('Announcing server started.')
-        else:
-            logging.warning('Server is already running')
-
-
-    def stop(self):
-        """
-        Stop the TCP server and UDP broadcasting
-        """
-        if not self.server:
-            raise Exception('Server is already stopped')
-        else:
-            self.server.shutdown()
-            self.server = None
-            logging.info('Server stopped')
-            self.announcer.stop()
-            logging.info('Announcing server stopped')
+        self._server.message_all("RESTART")
 
 
 
 
-# if __name__ == "__main__":
-    # print("loaded {} tracks".format(len(server.queue)))
-    #
-    # print("Play queue length: {}".format(len(server.queue)))
-    # print("Player state: {}".format(server._player.get_state()))
-    # print("Currently playing: {}".format(server.now_playing))
-    #
-    #
-    # server.play()
-    # server.position = 95
-    # counter = 0
-    # while True:
-    #     counter +=1
-    #     time.sleep(1)
-    #     print("Play queue length: {}".format(len(server.queue)))
-    #     print("History stack length: {}".format(len(server.history)))
-    #     print("Player state: {}".format(server._player.get_state()))
-    #     print("Currently playing: {}".format(server.now_playing))
-    #     if counter == 20:
-    #         server.previous()
 
 
 
@@ -551,6 +524,7 @@ logging.basicConfig(level=logging.INFO)
 server = MediaServer()
 #Load some fucking tracks
 playlist = (
+            "http://bbcmedia.ic.llnwd.net/stream/bbcmedia_lc1_radio1_p?s=1398175066&e=1398189466&h=6f82ebdc4806c8c259ff90e63f7f482d",
             "/Users/charlie/Music/iTunes/iTunes Media/Music/Snow Patrol/Fallen Empires/02 Called Out In The Dark.mp3",
             "http://icy-e-01.sharp-stream.com:80/tcnation.mp3",
             "/Users/charlie/Music/iTunes/iTunes Media/Music/Arctic Monkeys/AM (Deluxe LP Edition)/11 Knee Socks.mp3",
