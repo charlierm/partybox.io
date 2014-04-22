@@ -91,6 +91,9 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         Handles the request, continuously checks the outbox queue pushing any messages to the client. Blocks until
         the connection is explicitly closed or an exception is raised.
         """
+        #Send connection confirmation to client
+        msg = "CONNECTED {}".format(self.client_address[0])
+        self.queue.put(msg)
         while True:
             msg = self.queue.get(block=True)
             self.request.sendall(msg)

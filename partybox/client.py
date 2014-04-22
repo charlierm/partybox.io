@@ -100,6 +100,7 @@ s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(('224.0.0.1', PORT))
 
 server_ip = None
+my_ip = None
 
 while True:
     data, addr = s.recvfrom(1024)
@@ -119,17 +120,20 @@ while True:
 s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 s.connect((server_ip, PORT))
 
+data = s.recv(1024)
+if 'CONNECTED' in data:
+    my_ip = data.split(" ")[1]
+    print("Connected to host")
+
 #Set the media for vlc
-media = vlc.Media("rtp://{0}:{1}".format(server_ip, PORT))
+media = vlc.Media("rtp://{0}:{1}".format(my_ip, PORT))
 player.set_media(media)
+player.play()
 
 while True:
     data = s.recv(1024)
     print(data)
-    if 'SOUT UPDATED' in data:
-        print("Starting stream")
-        print player.play()
-    elif 'RESTART' in data:
+    if 'RESTART' in data:
         print("Restarting stream")
         player.stop()
         player.play()
