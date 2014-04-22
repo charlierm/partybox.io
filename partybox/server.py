@@ -4,6 +4,7 @@ import logging
 import time
 import json
 import select
+import multiprocessing
 
 import vlc
 import media
@@ -83,7 +84,7 @@ class ThreadedTCPRequestHandler(socketserver.BaseRequestHandler):
         Sets up the handlers outbox queue and log, because the handler blocks finish_request until it closes we have
         to add the handler to the clients list in this method. Its a bit backwards but it works!
         """
-        self.server.clients[self.client_address] = self
+        self.server._clients[self.client_address] = self
         self.queue = queue.Queue()
         self.log = logging.getLogger('Request')
 
@@ -122,14 +123,6 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
 
     allow_reuse_address = True
 
-    def serve_forever(self, poll_interval=0.5):
-        """
-        Starts announcing over UDP when the TCPServer is running.
-        """
-        self.announcer.start()
-        socketserver.TCPServer.serve_forever(self, poll_interval)
-
-
     def __init__(self, server_address, RequestHandlerClass, bind_and_activate=True):
         """
         :param server_address: The host address, usually '0.0.0.0'
@@ -140,6 +133,11 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         self.log = logging.getLogger('server')
         self._clients = {}
 
+        #Start pinging
+        t = threading.Thread(target=self.ping)
+        t.daemon = True
+        t.start()
+
         msg = {
             'PARTYBOX': {
                 'TYPE': 'BROADCAST',
@@ -148,6 +146,26 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
         }
         #Setup Announcer
         self.announcer = UDPAnnounce(("224.0.0.1", self.server_address[1]), msg)
+
+    def ping(self):
+        while True:
+            time.sleep(5)
+            self.message_all("PING\n")
+
+    def serve_forever(self, poll_interval=0.5):
+        """
+        Starts announcing over UDP when the TCPServer is running.
+        """
+        self.announcer.start()
+        socketserver.TCPServer.serve_forever(self, poll_interval)
+
+    def stop(self):
+        """
+        Stops the server broadcasting.1
+        """
+        self._timer.cancel()
+        self.ping_running = False
+
 
     def finish_request(self, request, client_address):
         """
@@ -190,9 +208,12 @@ class TCPServer(socketserver.ThreadingMixIn, socketserver.TCPServer):
     @property
     def clients(self):
         """
-        List of connected clients
+        List of unique clients
         """
-        return self._clients
+        clients = []
+        for client in self._clients.keys():
+            clients.append(client[0])
+        return list(set(clients))
 
 
     def shutdown(self):
@@ -208,15 +229,30 @@ class RDPConsumer(object):
     pass
 
 
+class VLCTools(object):
+
+    @staticmethod
+    def generate_sout(clients, port):
+        sout = []
+        for client in clients:
+            protocol = 'udp'
+            cmd = "dst=rtp{{access={0},mux=ts,dst={1},port={2}}}".format(
+                protocol, client, port)
+            sout.append(cmd)
+        sout.append("dst=rtp{{access=udp,mux=ts,dst=224.0.0.1,port={0}}}".format(port+1))
+        return ":sout=#transcode{{acodec=mp3,ab=320}}: duplicate{{{0}}}".format(",".join(sout))
+
+
+
 class MediaServer(object):
     """
     Plays music and streams it to clients.
     """
 
-    def __init__(self, media_port=7775, comm_port=7776):
+    def __init__(self, media_port=7775, comm_port=7777):
         #Start the TCP server
-        self.server = TCPServer(("0.0.0.0", comm_port), ThreadedTCPRequestHandler)
-        t = threading.Thread(target=self.server.serve_forever)
+        self._server = TCPServer(("0.0.0.0", comm_port), ThreadedTCPRequestHandler)
+        t = threading.Thread(target=self._server.serve_forever)
         t.daemon = True
         t.start()
         #Setup vlc
@@ -244,7 +280,6 @@ class MediaServer(object):
         """
         return self._queue
 
-    @decorators.synchronized
     def previous(self):
         """
         Plays the most recent track in history
@@ -258,12 +293,16 @@ class MediaServer(object):
             self._log.warning("No tracks in history to load")
             return
 
+        playing = self._player.get_state() == vlc.State.Playing
+
         #Load the media
-        m = vlc.Media(media.get_uri())
+        m = self._get_vlc_media(media.get_uri())
         self._player.set_media(m)
         self._now_playing = media
 
-    @decorators.synchronized
+        if playing:
+            self.play()
+
     def next(self):
         """
         Skips to the next track in the Queue
@@ -275,20 +314,26 @@ class MediaServer(object):
         try:
             media = self._queue.pop(0)
         except IndexError:
-            #No tracks left in the queue so stop
-            self.stop()
-            return
+            #No tracks left in the queue so return
+            return None
+
+        playing = self._player.get_state() == vlc.State.Playing
+
+        #Stop and clear previous player
+        if playing:
+            self._player.stop()
+
+        print(self._player.get_state())
 
         #Create new player and attach events
-        paused = self.paused
         self._player = vlc.MediaPlayer(self.instance)
         self._setup_events()
 
         #Load media
-        m = vlc.Media(media.get_uri())
+        m = self._get_vlc_media(media.get_uri())
         self._player.set_media(m)
         self._now_playing = media
-        if not paused:
+        if playing:
             self.play()
 
     def _encountered_error(self, event):
@@ -298,34 +343,34 @@ class MediaServer(object):
         self._log.error(vlc.libvlc_errmsg())
         self.next()
 
-    def _stopped(self, event):
-        """
-        Libvlc event, called when stopped. Empties queue and removes now playing.
-        """
-        self.queue.clear()
-        self._now_playing = None
-        self._player.set_media(None)
-
     def _end_reached(self, event):
         print("Track finished")
         print(event)
         self._log.info('Track ended')
         self.next()
+        self._player.play()
 
     def _media_changed(self, event):
         self._log.info("Track changed: {}".format(self._player.get_media().get_mrl()))
+        self._server.message_all("Track changed!!!")
 
     def _setup_events(self):
         self.events = self._player.event_manager()
         self.events.event_attach(vlc.EventType.MediaPlayerEndReached, self._end_reached)
-        self.events.event_attach(vlc.EventType.MediaPlayerStopped, self._stopped)
         self.events.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._encountered_error)
         self.events.event_attach(vlc.EventType.MediaPlayerMediaChanged, self._media_changed)
 
 
+    def _get_vlc_media(self, uri):
+        cmd = VLCTools.generate_sout(self._server.clients, self._port)
+        print cmd
+        return vlc.Media(uri, cmd)
+
+
     def stop(self):
-        if self._player.get_media():
-            self.stop()
+        if 0 <= self._player.stop():
+            self._now_playing = None
+
 
     def play(self):
         """
@@ -334,6 +379,7 @@ class MediaServer(object):
         #Check for loaded media
         if not self._player.get_media():
             self.next()
+            self._player.play()
             return
 
         state = self._player.get_state()
@@ -353,6 +399,7 @@ class MediaServer(object):
     def position(self):
         pos = self._player.get_position()
         if pos < 0:
+            print(vlc.libvlc_errmsg())
             return None
         else:
             return pos*100
@@ -360,7 +407,6 @@ class MediaServer(object):
     @position.setter
     def position(self, value):
         self._player.set_position(float(value)/100)
-
 
     def pause(self):
         self._player.set_pause(True)
@@ -374,7 +420,50 @@ class MediaServer(object):
 
     @paused.setter
     def paused(self, value):
-        self.pause()
+        self._player.set_pause(value)
+
+    @property
+    def volume(self):
+        return self._player.audio_get_volume()
+
+    @volume.setter
+    def volume(self, value):
+        self._player.audio_set_volume(value)
+
+
+    @property
+    def time(self):
+        return self._player.get_time()/1000.0
+
+    @time.setter
+    def time(self, value):
+        self._player.set_time(value*1000)
+
+    def fade_out(self):
+        v = self.volume
+        while self.volume > 0:
+            self.volume -= 1
+            time.sleep(0.05)
+        self.stop()
+        self.volume = v
+
+
+    def update_stream(self):
+        if not self._player.get_media():
+            return
+        playing = self._player.get_state() == vlc.State.Playing
+        if playing:
+            self.pause()
+
+        pos = self.position
+        uri = self.now_playing.get_uri()
+        m = self._get_vlc_media(uri)
+        self._player.set_media(m)
+
+        if playing:
+            self._player.play()
+            self.position = pos
+
 
 
 
@@ -435,45 +524,48 @@ class StreamingServer(object):
 
 
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    server = MediaServer()
-    #Load some fucking tracks
-    playlist = (
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Arctic Monkeys/AM (Deluxe LP Edition)/11 Knee Socks.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Athlete/Vehicles & Animals/01 El Salvador.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Bon Iver/For Emma, Forever Ago/09 Re_ Stacks.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/The Killers/Sam's Town/03 When You Were Young.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Of Monsters and Men/My Head Is an Animal/13 Numb Bears.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Rhye/Woman/02 The Fall.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Tycho/Dive/01 A Walk.mp3",
-        "/Users/charlie/Music/iTunes/iTunes Media/Music/Snow Patrol/Fallen Empires/02 Called Out In The Dark.mp3"
-    )
-    for t in playlist:
-        server.queue.append(media.TestMedia(t))
-
-    server.queue.shuffle()
-    print("loaded {} tracks".format(len(server.queue)))
-
-    print("Play queue length: {}".format(len(server.queue)))
-    print("Player state: {}".format(server._player.get_state()))
-    print("Currently playing: {}".format(server.now_playing))
+# if __name__ == "__main__":
+    # print("loaded {} tracks".format(len(server.queue)))
+    #
+    # print("Play queue length: {}".format(len(server.queue)))
+    # print("Player state: {}".format(server._player.get_state()))
+    # print("Currently playing: {}".format(server.now_playing))
+    #
+    #
+    # server.play()
+    # server.position = 95
+    # counter = 0
+    # while True:
+    #     counter +=1
+    #     time.sleep(1)
+    #     print("Play queue length: {}".format(len(server.queue)))
+    #     print("History stack length: {}".format(len(server.history)))
+    #     print("Player state: {}".format(server._player.get_state()))
+    #     print("Currently playing: {}".format(server.now_playing))
+    #     if counter == 20:
+    #         server.previous()
 
 
-    server.play()
-    server.position = 95
-    counter = 0
-    while True:
-        counter +=1
-        time.sleep(1)
-        print("Play queue length: {}".format(len(server.queue)))
-        print("History stack length: {}".format(len(server.history)))
-        print("Player state: {}".format(server._player.get_state()))
-        print("Currently playing: {}".format(server.now_playing))
-        if counter == 20:
-            server.previous()
+
+logging.basicConfig(level=logging.INFO)
+server = MediaServer()
+#Load some fucking tracks
+playlist = (
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Snow Patrol/Fallen Empires/02 Called Out In The Dark.mp3",
+            "http://icy-e-01.sharp-stream.com:80/tcnation.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Arctic Monkeys/AM (Deluxe LP Edition)/11 Knee Socks.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Athlete/Vehicles & Animals/01 El Salvador.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Bon Iver/For Emma, Forever Ago/09 Re_ Stacks.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/The Killers/Sam's Town/03 When You Were Young.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Of Monsters and Men/My Head Is an Animal/13 Numb Bears.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Rhye/Woman/02 The Fall.mp3",
+            "/Users/charlie/Music/iTunes/iTunes Media/Music/Tycho/Dive/01 A Walk.mp3",
+)
+for t in playlist:
+    server.queue.append(media.TestMedia(t))
 
 
+server.play()
 
 
 

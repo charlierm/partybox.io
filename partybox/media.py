@@ -93,6 +93,9 @@ class TestMedia(AbstractMedia):
     def __str__(self):
         return self._uri
 
+    def __repr__(self):
+        return self._uri
+
 
 class BaseList(collections.MutableSequence):
     """
