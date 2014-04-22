@@ -54,9 +54,44 @@ class AbstractMedia(object):
     def get_uri(self):
         """
         Returns the URI for the media, this can be a one time URI.
-
         """
         pass
+
+
+class TestMedia(AbstractMedia):
+    """
+    Simple subclass of AbstractMedia for testing purposes
+    """
+
+    def __init__(self, uri):
+        self._uri = uri
+
+    @property
+    def length(self):
+        return 0
+
+    @property
+    def artist(self):
+        return "Test Artist"
+
+    @property
+    def title(self):
+        return "Test Title"
+
+    @property
+    def album(self):
+        return "Test Album"
+
+    @property
+    def artwork(self):
+        return "https://discussions.apple.com/servlet/JiveServlet/showImage/2-20511310-185873/black.png"
+
+    def get_uri(self):
+        return self._uri
+
+
+    def __str__(self):
+        return self._uri
 
 
 class BaseList(collections.MutableSequence):
@@ -170,6 +205,10 @@ class Queue(BaseList):
 
 
 class CollaborativeQueue(Queue):
+    """
+    Queue to collaboratively control the server.
+    """
 
     def __init__(self):
         raise NotImplementedError()
+
